@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ================================
+   THEME VARIABLES (FUTURE-PROOF)
+   ================================ */
+
+:root {
+    --bg: #121212;
+    --card: #1A1A1A;
+    --border: #2A2A2A;
+    --text: #E5E5E5;
+    --muted: #9CA3AF;
+}
+
+[data-theme="light"] {
+    --bg: #F9FAFB;
+    --card: #FFFFFF;
+    --border: #E5E7EB;
+    --text: #111827;
+    --muted: #6B7280;
+}
+
+html,
+body,
+#root {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+}
