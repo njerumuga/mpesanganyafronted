@@ -128,11 +128,21 @@ export default function EventDetails() {
                 }),
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
 
-            // If this event is PAYBILL -> trigger Daraja STK Push
-            if ((event.paymentMethod || "").toUpperCase() === "PAYBILL") {
-                // call backend to push STK
+            if (!response.ok) {
+                console.error("Booking API error", response.status, data);
+                setPayStatus(null);
+                setSuccess(null);
+                alert(data?.error || data?.message || `Booking failed (${response.status})`);
+                return;
+            }
+
+            // ✅ STK Push for BOTH TILL and PAYBILL (production goal)
+            const method = (event.paymentMethod || "TILL").toUpperCase();
+            const hasNumber = !!(event.paymentNumber && String(event.paymentNumber).trim());
+
+            if ((method === "PAYBILL" || method === "TILL") && hasNumber) {
                 const payRes = await fetch(`${API_BASE}/api/payments/stk-push`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -141,7 +151,14 @@ export default function EventDetails() {
                         phoneNumber: phoneNumber.trim(),
                     }),
                 });
-                const payData = await payRes.json();
+
+                const payData = await payRes.json().catch(() => ({}));
+
+                if (!payRes.ok) {
+                    console.error("STK API error", payRes.status, payData);
+                    alert(payData?.message || payData?.error || `Payment request failed (${payRes.status})`);
+                    return;
+                }
 
                 if (payData?.status === "PAID") {
                     setPayStatus("PAID");
@@ -151,7 +168,6 @@ export default function EventDetails() {
                     setPayStatus("PENDING");
                     setCheckoutRequestId(payData.checkoutRequestId);
                 }
-
                 return;
             }
 
@@ -173,9 +189,8 @@ export default function EventDetails() {
                 "_blank"
             );
 
+            // Manual WhatsApp fallback (only when event has no configured payment number)
             setSuccess({ pending: true });
-
-            await refreshEvent();
 
             setCustomerName("");
             setPhoneNumber("");
@@ -286,16 +301,25 @@ export default function EventDetails() {
                                 >
                                     {loading
                                         ? "Processing..."
-                                        : (event.paymentMethod || "TILL").toUpperCase() === "PAYBILL"
+                                        : (((event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" || (event.paymentMethod || "TILL").toUpperCase() === "TILL")
+                                            && (event.paymentNumber && String(event.paymentNumber).trim()))
                                             ? "Pay with M-Pesa (STK Push)"
                                             : "Book via WhatsApp"}
                                 </button>
 
-                                {(event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" && (
+                                {(((event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" || (event.paymentMethod || "TILL").toUpperCase() === "TILL")
+                                    && (event.paymentNumber && String(event.paymentNumber).trim())) && (
                                     <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
-                                        <div className="font-semibold text-white">Paybill Payment</div>
-                                        <div>Paybill: <b>{event.paymentNumber || "(not set)"}</b></div>
-                                        {event.paybillAccount && <div>Account: <b>{event.paybillAccount}</b></div>}
+                                        <div className="font-semibold text-white">M-Pesa STK Push</div>
+                                        <div>
+                                            Method: <b>{(event.paymentMethod || "TILL").toUpperCase()}</b>
+                                        </div>
+                                        <div>
+                                            {(event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" ? "Paybill" : "Till"}: <b>{event.paymentNumber}</b>
+                                        </div>
+                                        {(event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" && event.paybillAccount && (
+                                            <div>Account: <b>{event.paybillAccount}</b></div>
+                                        )}
                                         {payStatus === "PENDING" && (
                                             <div className="mt-2 text-cyan-200 font-semibold">Waiting for STK confirmation... enter your PIN.</div>
                                         )}
@@ -309,12 +333,18 @@ export default function EventDetails() {
 
                         {success && (
                             <div className="mt-6 rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-emerald-200 font-semibold text-center">
-                                ✅ Booking successful <br />
-                                Ticket Code: <b>{success.ticketCode ? success.ticketCode : "Pending payment"}</b>
-                                {!success.ticketCode && (
-                                    <div className="mt-1 text-xs text-emerald-100/80">
-                                        For Till payments, complete the payment via WhatsApp, then the admin will confirm and you will receive your ticket code.
-                                    </div>
+                                {success.ticketCode ? (
+                                    <>
+                                        ✅ Payment confirmed <br />
+                                        Ticket Code: <b>{success.ticketCode}</b>
+                                    </>
+                                ) : (
+                                    <>
+                                        ✅ Booking created <br />
+                                        <span className="font-normal text-emerald-100/90">
+                                            Complete payment on the STK prompt to receive your ticket code.
+                                        </span>
+                                    </>
                                 )}
                             </div>
                         )}
