@@ -15,7 +15,7 @@ export default function EventDetails() {
     const [payStatus, setPayStatus] = useState(null); // PENDING | PAID | FAILED
     const [checkoutRequestId, setCheckoutRequestId] = useState(null);
 
-    // Small helper to survive Render cold starts (server sleeping)
+    // Helper to survive Render cold starts
     async function fetchJsonWithRetry(url, { retries = 3, timeoutMs = 15000 } = {}) {
         let lastErr;
         for (let attempt = 1; attempt <= retries; attempt++) {
@@ -48,19 +48,20 @@ export default function EventDetails() {
         throw err;
     }
 
-
     const refreshEvent = async () => {
-        const data = await fetchJsonWithRetry(`${API_BASE}/api/events/${id}`, { retries: 4, timeoutMs: 15000 });
-        setEvent(data);
+        try {
+            const data = await fetchJsonWithRetry(`${API_BASE}/api/events/${id}`, { retries: 4, timeoutMs: 15000 });
+            setEvent(data);
+        } catch (e) {
+            console.error("Could not load event", e);
+        }
     };
 
     useEffect(() => {
         refreshEvent();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [id]);
 
-    // Poll payment status when we have a checkoutRequestId
-    // ⚠️ Must be declared BEFORE any early returns to keep hook order stable.
+    // Poll payment status
     useEffect(() => {
         if (!checkoutRequestId) return;
         let cancelled = false;
@@ -68,9 +69,6 @@ export default function EventDetails() {
         const tick = async () => {
             try {
                 const data = await fetchJsonWithRetry(`${API_BASE}/api/payments/status/${checkoutRequestId}`, { retries: 3, timeoutMs: 15000 });
-                // fetchJsonWithRetry already returns json
-
-                
                 if (cancelled) return;
 
                 const ps = String(data.paymentStatus || "").toUpperCase();
@@ -96,27 +94,19 @@ export default function EventDetails() {
             cancelled = true;
             clearInterval(interval);
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [checkoutRequestId]);
-
-    if (!event) {
-        return (
-            <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center text-white/70">
-                Loading event...
-            </div>
-        );
-    }
 
     const handleBooking = async () => {
         if (!selectedTicket || selectedTicket.seatsLeft <= 0) return;
         if (!customerName.trim() || !phoneNumber.trim()) return;
 
         setLoading(true);
+        setPayStatus(null);
+        setCheckoutRequestId(null);
+        setSuccess(null);
 
         try {
-            setPayStatus(null);
-            setCheckoutRequestId(null);
-
+            // --- STEP 1: CREATE BOOKING ---
             const response = await fetch(`${API_BASE}/api/bookings`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -128,17 +118,23 @@ export default function EventDetails() {
                 }),
             });
 
-            const data = await response.json().catch(() => ({}));
+            // GENTLE JSON PARSING: Fixes the "Unexpected token 'b'" error
+            let data;
+            const responseText = await response.text();
+            try {
+                data = JSON.parse(responseText);
+            } catch (e) {
+                data = { message: responseText }; // Use plain text as message if not JSON
+            }
 
             if (!response.ok) {
                 console.error("Booking API error", response.status, data);
-                setPayStatus(null);
-                setSuccess(null);
                 alert(data?.error || data?.message || `Booking failed (${response.status})`);
+                setLoading(false);
                 return;
             }
 
-            // ✅ STK Push for BOTH TILL and PAYBILL (production goal)
+            // --- STEP 2: HANDLE PAYMENT ---
             const method = (event.paymentMethod || "TILL").toUpperCase();
             const hasNumber = !!(event.paymentNumber && String(event.paymentNumber).trim());
 
@@ -147,16 +143,23 @@ export default function EventDetails() {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                        bookingId: data.id,
+                        bookingId: data.id, // ID from Step 1
                         phoneNumber: phoneNumber.trim(),
                     }),
                 });
 
-                const payData = await payRes.json().catch(() => ({}));
+                let payData;
+                const payText = await payRes.text();
+                try {
+                    payData = JSON.parse(payText);
+                } catch (e) {
+                    payData = { message: payText };
+                }
 
                 if (!payRes.ok) {
                     console.error("STK API error", payRes.status, payData);
                     alert(payData?.message || payData?.error || `Payment request failed (${payRes.status})`);
+                    setLoading(false);
                     return;
                 }
 
@@ -168,48 +171,46 @@ export default function EventDetails() {
                     setPayStatus("PENDING");
                     setCheckoutRequestId(payData.checkoutRequestId);
                 }
-                return;
+            } else {
+                // WHATSAPP FALLBACK
+                const message =
+                    `Hello Nganya Experience 👋\n\n` +
+                    `🎉 Event: ${event.title}\n` +
+                    `🎟️ Ticket: ${selectedTicket.name}\n` +
+                    `👤 Name: ${customerName}\n` +
+                    `📞 Phone: ${phoneNumber}\n` +
+                    `🧾 Booking ID: ${data.id}`;
+
+                window.open(`https://wa.me/${ADMIN_PHONE}?text=${encodeURIComponent(message)}`, "_blank");
+                setSuccess({ pending: true });
             }
-
-            const message =
-                `Hello Nganya Experience 👋\n\n` +
-                `🎉 Event: ${event.title}\n` +
-                `📍 Location: ${event.location}\n` +
-                `📅 Date: ${event.date} ${event.time || ""}\n\n` +
-                `🎟️ Ticket: ${selectedTicket.name}\n` +
-                `💰 Price: KES ${selectedTicket.price}\n\n` +
-                `👤 Name: ${customerName}\n` +
-                `📞 Phone: ${phoneNumber}\n\n` +
-                `🧾 Booking ID: ${data.id}\n` +
-                `💳 Payment Method: ${(event.paymentMethod || "TILL")}\n` +
-                `${(event.paymentMethod || "TILL").toUpperCase() === "TILL" ? `✅ Pay via Till: ${event.paymentNumber || "(not set)"}` : `✅ Pay via Paybill: ${event.paymentNumber || "(not set)"} ACC: ${event.paybillAccount || "(your name/phone)"}`}`;
-
-            window.open(
-                `https://wa.me/${ADMIN_PHONE}?text=${encodeURIComponent(message)}`,
-                "_blank"
-            );
-
-            // Manual WhatsApp fallback (only when event has no configured payment number)
-            setSuccess({ pending: true });
 
             setCustomerName("");
             setPhoneNumber("");
             setSelectedTicket(null);
         } catch (e) {
-            console.error("Booking failed", e);
+            console.error("Booking process crashed", e);
+            alert("A network error occurred. Please try again.");
         } finally {
             setLoading(false);
         }
     };
 
+    if (!event) {
+        return (
+            <div className="min-h-screen bg-[#0B0F1A] flex items-center justify-center text-white/70">
+                Loading event details...
+            </div>
+        );
+    }
+
     return (
         <div className="min-h-screen bg-[#0B0F1A] text-gray-200 px-4 pb-10">
-            <div className="max-w-5xl mx-auto">
-                <div className="rounded-2xl overflow-hidden border border-white/10 bg-white/5 shadow-[0_20px_70px_rgba(0,0,0,0.65)]">
+            <div className="max-w-5xl mx-auto pt-10">
+                <div className="rounded-2xl overflow-hidden border border-white/10 bg-white/5 shadow-2xl">
                     <div className="relative">
                         <img
                             src={event.posterUrl || "/placeholder.jpg"}
-                            onError={(e) => (e.currentTarget.src = "/placeholder.jpg")}
                             alt={event.title}
                             className="w-full h-80 object-cover"
                         />
@@ -217,35 +218,24 @@ export default function EventDetails() {
                     </div>
 
                     <div className="p-6 md:p-8">
-                        <h1 className="text-3xl md:text-4xl font-extrabold text-white">
-                            {event.title}
-                        </h1>
+                        <h1 className="text-3xl md:text-4xl font-extrabold text-white">{event.title}</h1>
                         <div className="mt-2 text-white/70">
                             <div>{event.location}</div>
-                            <div className="text-sm text-white/50">
-                                {event.date} {event.time ? `· ${event.time}` : ""}
-                            </div>
+                            <div className="text-sm text-white/50">{event.date} · {event.time}</div>
                         </div>
 
-                        <p className="mt-5 text-white/80 leading-relaxed">
-                            {event.description}
-                        </p>
+                        <p className="mt-5 text-white/80 leading-relaxed">{event.description}</p>
 
-                        <h2 className="text-2xl font-bold mt-10 mb-4 text-white">
-                            Select Ticket
-                        </h2>
-
+                        <h2 className="text-2xl font-bold mt-10 mb-4 text-white">Select Ticket</h2>
                         <div className="space-y-4">
                             {event.tickets?.map((ticket) => {
                                 const soldOut = ticket.seatsLeft <= 0;
-
                                 return (
                                     <label
                                         key={ticket.id}
-                                        className={`flex justify-between items-center rounded-xl border p-4 transition
-                      ${soldOut ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:border-cyan-400/40"}
-                      ${selectedTicket?.id === ticket.id ? "border-cyan-400/50 bg-black/20" : "border-white/10 bg-black/10"}
-                    `}
+                                        className={`flex justify-between items-center rounded-xl border p-4 transition 
+                                            ${soldOut ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:border-cyan-400/40"}
+                                            ${selectedTicket?.id === ticket.id ? "border-cyan-400/50 bg-black/20" : "border-white/10 bg-black/10"}`}
                                     >
                                         <div className="flex items-center gap-3">
                                             <input
@@ -255,96 +245,55 @@ export default function EventDetails() {
                                                 onChange={() => setSelectedTicket(ticket)}
                                             />
                                             <span className="font-semibold text-white">
-                        {ticket.name}
-                                                {soldOut && (
-                                                    <span className="ml-2 text-red-300 font-bold text-sm">
-                            SOLD OUT
-                          </span>
-                                                )}
-                      </span>
+                                                {ticket.name} {soldOut && <span className="ml-2 text-red-400 text-xs font-bold">SOLD OUT</span>}
+                                            </span>
                                         </div>
-
                                         <div className="text-right">
-                                            <p className="font-extrabold text-white">
-                                                KES {ticket.price}
-                                            </p>
-                                            <p className="text-sm text-white/60">
-                                                {ticket.seatsLeft} seats left
-                                            </p>
+                                            <p className="font-extrabold text-white">KES {ticket.price}</p>
+                                            <p className="text-xs text-white/60">{ticket.seatsLeft} left</p>
                                         </div>
                                     </label>
                                 );
                             })}
                         </div>
 
-                        {selectedTicket && selectedTicket.seatsLeft > 0 && (
+                        {selectedTicket && !selectedTicket.seatsLeft <= 0 && (
                             <div className="mt-8 space-y-4">
                                 <input
-                                    placeholder="Your Name"
+                                    placeholder="Your Full Name"
                                     value={customerName}
                                     onChange={(e) => setCustomerName(e.target.value)}
-                                    className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none"
+                                    className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none focus:border-cyan-400/50"
                                 />
-
                                 <input
-                                    placeholder="Phone Number"
+                                    placeholder="M-Pesa Phone Number (e.g. 0712345678)"
                                     value={phoneNumber}
                                     onChange={(e) => setPhoneNumber(e.target.value)}
-                                    className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none"
+                                    className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-white outline-none focus:border-cyan-400/50"
                                 />
-
                                 <button
                                     onClick={handleBooking}
                                     disabled={!customerName || !phoneNumber || loading}
-                                    className="w-full rounded-xl py-3 font-semibold text-white
-                    bg-gradient-to-r from-purple-600 to-cyan-500 hover:brightness-110 disabled:opacity-60"
+                                    className="w-full rounded-xl py-4 font-bold text-white bg-gradient-to-r from-purple-600 to-cyan-500 hover:brightness-110 disabled:opacity-50 transition-all"
                                 >
-                                    {loading
-                                        ? "Processing..."
-                                        : (((event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" || (event.paymentMethod || "TILL").toUpperCase() === "TILL")
-                                            && (event.paymentNumber && String(event.paymentNumber).trim()))
-                                            ? "Pay with M-Pesa (STK Push)"
-                                            : "Book via WhatsApp"}
+                                    {loading ? "Processing..." : "Confirm & Pay with M-Pesa"}
                                 </button>
+                            </div>
+                        )}
 
-                                {(((event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" || (event.paymentMethod || "TILL").toUpperCase() === "TILL")
-                                    && (event.paymentNumber && String(event.paymentNumber).trim())) && (
-                                    <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
-                                        <div className="font-semibold text-white">M-Pesa STK Push</div>
-                                        <div>
-                                            Method: <b>{(event.paymentMethod || "TILL").toUpperCase()}</b>
-                                        </div>
-                                        <div>
-                                            {(event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" ? "Paybill" : "Till"}: <b>{event.paymentNumber}</b>
-                                        </div>
-                                        {(event.paymentMethod || "TILL").toUpperCase() === "PAYBILL" && event.paybillAccount && (
-                                            <div>Account: <b>{event.paybillAccount}</b></div>
-                                        )}
-                                        {payStatus === "PENDING" && (
-                                            <div className="mt-2 text-cyan-200 font-semibold">Waiting for STK confirmation... enter your PIN.</div>
-                                        )}
-                                        {payStatus === "FAILED" && (
-                                            <div className="mt-2 text-red-200 font-semibold">Payment failed or cancelled. Try again.</div>
-                                        )}
-                                    </div>
-                                )}
+                        {payStatus === "PENDING" && (
+                            <div className="mt-4 p-4 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-200 text-center animate-pulse">
+                                Waiting for M-Pesa PIN entry on your phone...
                             </div>
                         )}
 
                         {success && (
-                            <div className="mt-6 rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-emerald-200 font-semibold text-center">
+                            <div className="mt-6 rounded-xl border border-emerald-400/20 bg-emerald-500/10 p-6 text-emerald-200 text-center">
+                                <div className="text-xl mb-1">✅ Success!</div>
                                 {success.ticketCode ? (
-                                    <>
-                                        ✅ Payment confirmed <br />
-                                        Ticket Code: <b>{success.ticketCode}</b>
-                                    </>
+                                    <div>Your Ticket Code: <span className="font-mono font-bold text-white bg-black/40 px-2 py-1 rounded">{success.ticketCode}</span></div>
                                 ) : (
-                                    <>
-                                        ✅ Booking created <br />
-                                        <span className="font-normal text-emerald-100/90">
-                                            Complete payment on the STK prompt to receive your ticket code.
-                                        </span>
-                                    </>
+                                    <div>Booking created. Please complete payment on your phone.</div>
                                 )}
                             </div>
                         )}
